@@ -82,6 +82,40 @@ async function fetchAuthMeGroupIds(request) {
     }
     return ids;
 }
+
+async function fetchAuthAdminUserGroupIds(request, userEmail) {
+    const authBase = getAuthBaseUrl(request);
+    if (!authBase)
+        return [];
+    const email = String(userEmail || '').trim().toLowerCase();
+    if (!email)
+        return [];
+    const headers = {
+        'Content-Type': 'application/json',
+    };
+    // Prefer service token for admin endpoints.
+    const serviceToken = process.env.HIT_SERVICE_TOKEN;
+    if (serviceToken)
+        headers['X-HIT-Service-Token'] = serviceToken;
+    // Also forward caller auth if present (useful in dev / when service token is not set).
+    const bearer = getBearerFromRequest(request);
+    if (bearer)
+        headers.Authorization = bearer;
+    const res = await fetch(`${authBase}/admin/users/${encodeURIComponent(email)}/groups`, { headers });
+    if (!res.ok)
+        return [];
+    const data = await res.json().catch(() => null);
+    if (!Array.isArray(data))
+        return [];
+    const ids = [];
+    for (const row of data) {
+        // Auth module uses `group_id` in UserGroupResponse.
+        const gid = row?.group_id ?? row?.groupId ?? null;
+        if (gid)
+            ids.push(String(gid));
+    }
+    return ids;
+}
 /**
  * Resolve the current user's principals for ACL checks.
  *
@@ -105,6 +139,21 @@ export async function resolveUserPrincipals(options) {
         }
         catch {
             // Best effort only; callers should still function on JWT-only groups.
+        }
+    }
+
+    // Also include admin-resolved groups when we have a service token.
+    // This restores dynamic groups like "Everyone" in deployments where segment evaluation
+    // requires service/admin privileges.
+    if (includeAuthMeGroups && request && userEmail) {
+        try {
+            const hasServiceToken = Boolean(process.env.HIT_SERVICE_TOKEN);
+            if (hasServiceToken) {
+                groupIds.push(...(await fetchAuthAdminUserGroupIds(request, userEmail)));
+            }
+        }
+        catch {
+            // Best effort
         }
     }
     if (extraGroupIds) {

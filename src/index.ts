@@ -196,14 +196,19 @@ export async function resolveUserPrincipals(options: ResolveUserPrincipalsOption
     }
   }
 
-  // Fallback: if the request cannot authenticate to `/me/groups` (common when upstream auth
-  // is via proxy headers and no bearer/cookie is present), try the admin endpoint using
-  // service token. This is how Vault/CRM resolve dynamic groups like "Everyone".
+  // Also include admin-resolved groups when we have a service token.
+  //
+  // Why:
+  // - Dynamic groups ("Everyone", segments-backed groups) may require service/admin privileges
+  //   during evaluation (auth module calls segments/metrics-core).
+  // - Some deployments authenticate requests via non-`hit_token` cookies/proxy headers, which means
+  //   `/me/groups` can return incomplete results even though the app can still authenticate the user.
+  // - Historically, Vault used the admin endpoint with a service token, which is why group sharing
+  //   worked there. We want that behavior consistently across feature packs.
   if (includeAuthMeGroups && request && userEmail) {
     try {
-      const hasBearer = Boolean(getBearerFromRequest(request));
       const hasServiceToken = Boolean(process.env.HIT_SERVICE_TOKEN);
-      if (!hasBearer && hasServiceToken) {
+      if (hasServiceToken) {
         groupIds.push(...(await fetchAuthAdminUserGroupIds(request, userEmail)));
       }
     } catch {
