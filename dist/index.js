@@ -85,6 +85,7 @@ async function fetchAuthMeGroupIds(request, strict) {
     const headers = {
         'Content-Type': 'application/json',
     };
+    headers['X-Frontend-Base-URL'] = baseUrlFromRequest(request);
     const bearer = getBearerFromRequest(request);
     if (bearer)
         headers.Authorization = bearer;
@@ -127,6 +128,7 @@ async function fetchAuthAdminUserGroupIds(request, userEmail, strict) {
     const headers = {
         'Content-Type': 'application/json',
     };
+    headers['X-Frontend-Base-URL'] = baseUrlFromRequest(request);
     // Prefer service token for admin endpoints.
     const serviceToken = process.env.HIT_SERVICE_TOKEN;
     if (serviceToken)
@@ -203,21 +205,9 @@ export async function resolveUserPrincipals(options) {
     // Also include admin-resolved groups when we have a service token.
     // This restores dynamic groups like "Everyone" in deployments where segment evaluation
     // requires service/admin privileges.
-    if (includeAuthMeGroups && request && userEmail) {
-        const hasServiceToken = Boolean(process.env.HIT_SERVICE_TOKEN);
-        if (!hasServiceToken) {
-            warnOnce('no_service_token_admin_groups', '[acl-utils] resolveUserPrincipals(): HIT_SERVICE_TOKEN not set; admin-resolved dynamic groups (e.g. "Everyone") may be missing.');
-        }
-        else {
-            try {
-                groupIds.push(...(await fetchAuthAdminUserGroupIds(request, userEmail, strict)));
-            }
-            catch (e) {
-                if (strict)
-                    throw e;
-            }
-        }
-    }
+    // NOTE: Do NOT call auth admin endpoints for group membership here.
+    // `/admin/users/{email}/groups` is admin-gated and will return 403 for normal users even with a service token.
+    // Dynamic groups are included in `/me/groups` (when enabled) and that endpoint is what callers should use.
     if (extraGroupIds) {
         try {
             groupIds.push(...(await extraGroupIds()));

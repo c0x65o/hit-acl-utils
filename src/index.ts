@@ -53,6 +53,8 @@ export interface ResolveUserPrincipalsOptions {
 let _warnedNoRequest = false;
 let _warnedNoAuthForMeGroups = false;
 let _warnedNoServiceTokenForAdminGroups = false;
+let _warnedAdminGroupsForbidden = false;
+let _adminGroupsEndpointForbidden = false;
 function warnOnce(kind: 'no_request' | 'no_auth_for_me_groups' | 'no_service_token_admin_groups', msg: string) {
   if (kind === 'no_request') {
     if (_warnedNoRequest) return;
@@ -64,6 +66,12 @@ function warnOnce(kind: 'no_request' | 'no_auth_for_me_groups' | 'no_service_tok
     if (_warnedNoServiceTokenForAdminGroups) return;
     _warnedNoServiceTokenForAdminGroups = true;
   }
+  console.warn(msg);
+}
+
+function warnAdminGroupsForbiddenOnce(msg: string) {
+  if (_warnedAdminGroupsForbidden) return;
+  _warnedAdminGroupsForbidden = true;
   console.warn(msg);
 }
 
@@ -137,6 +145,10 @@ async function fetchAuthMeGroupIds(request: RequestLike, strict?: boolean): Prom
     'Content-Type': 'application/json',
   };
 
+  // Auth module needs to know the dashboard origin so it can call metrics-core segment APIs.
+  // When we call auth directly (HIT_AUTH_URL) instead of via the dashboard proxy, we must provide this.
+  headers['X-Frontend-Base-URL'] = baseUrlFromRequest(request);
+
   const bearer = getBearerFromRequest(request);
   if (bearer) headers.Authorization = bearer;
 
@@ -166,6 +178,12 @@ async function fetchAuthMeGroupIds(request: RequestLike, strict?: boolean): Prom
 }
 
 async function fetchAuthAdminUserGroupIds(request: RequestLike, userEmail: string, strict?: boolean): Promise<string[]> {
+  // If we've already learned this endpoint is forbidden in this deployment (service token lacks perms),
+  // don't keep retrying on every request.
+  if (_adminGroupsEndpointForbidden) {
+    return [];
+  }
+
   const authBase = getAuthBaseUrl(request);
   if (!authBase) {
     if (strict) throw new Error('[acl-utils] Auth base URL not configured (HIT_AUTH_URL / NEXT_PUBLIC_HIT_AUTH_URL or /api/proxy/auth).');
@@ -178,6 +196,9 @@ async function fetchAuthAdminUserGroupIds(request: RequestLike, userEmail: strin
     'Content-Type': 'application/json',
   };
 
+  // Same as above: required so auth can reach metrics-core segment APIs.
+  headers['X-Frontend-Base-URL'] = baseUrlFromRequest(request);
+
   // Prefer service token for admin endpoints.
   const serviceToken = process.env.HIT_SERVICE_TOKEN;
   if (serviceToken) headers['X-HIT-Service-Token'] = serviceToken;
@@ -188,6 +209,14 @@ async function fetchAuthAdminUserGroupIds(request: RequestLike, userEmail: strin
 
   const res = await fetch(`${authBase}/admin/users/${encodeURIComponent(email)}/groups`, { headers });
   if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      _adminGroupsEndpointForbidden = true;
+      warnAdminGroupsForbiddenOnce(
+        `[acl-utils] ${res.status} from ${authBase}/admin/users/{email}/groups. ` +
+          `Disabling admin-group expansion and relying on /me/groups instead.`
+      );
+      return [];
+    }
     if (strict) throw new Error(`[acl-utils] GET ${authBase}/admin/users/{email}/groups failed: ${res.status} ${res.statusText}`);
     return [];
   }
@@ -264,28 +293,9 @@ export async function resolveUserPrincipals(options: ResolveUserPrincipalsOption
     }
   }
 
-  // Also include admin-resolved groups when we have a service token.
-  //
-  // Why:
-  // - Dynamic groups ("Everyone", segments-backed groups) may require service/admin privileges
-  //   during evaluation (auth module calls segments/metrics-core).
-  // - Some deployments authenticate requests via non-`hit_token` cookies/proxy headers, which means
-  //   `/me/groups` can return incomplete results even though the app can still authenticate the user.
-  // - Historically, Vault used the admin endpoint with a service token, which is why group sharing
-  //   worked there. We want that behavior consistently across feature packs.
-  if (includeAuthMeGroups && request && userEmail) {
-    const hasServiceToken = Boolean(process.env.HIT_SERVICE_TOKEN);
-    if (!hasServiceToken) {
-      // In many deployments dynamic group evaluation needs the service token path.
-      warnOnce('no_service_token_admin_groups', '[acl-utils] resolveUserPrincipals(): HIT_SERVICE_TOKEN not set; admin-resolved dynamic groups (e.g. "Everyone") may be missing.');
-    } else {
-      try {
-        groupIds.push(...(await fetchAuthAdminUserGroupIds(request, userEmail, strict)));
-      } catch (e) {
-        if (strict) throw e;
-      }
-    }
-  }
+  // NOTE: Do NOT call auth admin endpoints for group membership here.
+  // `/admin/users/{email}/groups` is admin-gated and will return 403 for normal users even with a service token.
+  // Dynamic groups are included in `/me/groups` (when enabled) and that endpoint is what callers should use.
 
   if (extraGroupIds) {
     try {
