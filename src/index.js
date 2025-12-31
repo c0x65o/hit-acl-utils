@@ -167,7 +167,8 @@ async function fetchAuthAdminUserGroupIds(request, userEmail, strict) {
 export async function resolveUserPrincipals(options) {
     const { request, user, includeTokenGroups = true, includeAuthMeGroups = true, strict = false, extraGroupIds, } = options;
     const userId = String(user.sub || '').trim();
-    const userEmail = String(user.email || '').trim();
+    const userEmailRaw = String(user.email || '').trim();
+    const userEmail = userEmailRaw || (userId.includes('@') ? userId : '');
     const roles = uniqStrings(Array.isArray(user.roles) ? user.roles : []);
     const groupIds = [];
     if (includeTokenGroups) {

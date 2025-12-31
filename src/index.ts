@@ -226,7 +226,12 @@ export async function resolveUserPrincipals(options: ResolveUserPrincipalsOption
   } = options;
 
   const userId = String(user.sub || '').trim();
-  const userEmail = String(user.email || '').trim();
+  const userEmailRaw = String(user.email || '').trim();
+  // In some deployments the JWT may omit `email` but set `sub` to the email address.
+  // Dynamic group evaluation in auth module is email-based, so recover it when possible.
+  const userEmail =
+    userEmailRaw ||
+    (userId.includes('@') ? userId : '');
   const roles = uniqStrings(Array.isArray(user.roles) ? user.roles : []);
 
   const groupIds: string[] = [];
