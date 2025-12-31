@@ -39,6 +39,9 @@ export interface ResolveUserPrincipalsOptions {
      * Fail fast when group expansion cannot be performed.
      *
      * When true, this function throws instead of silently returning partial/incomplete groupIds.
+     * This is recommended for permission enforcement paths where "missing groups" should be treated
+     * as an error (fail closed) rather than "best effort" (fail open-ish).
+     *
      * Defaults to false for backwards compatibility.
      */
     strict?: boolean;

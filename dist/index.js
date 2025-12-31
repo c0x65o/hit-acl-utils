@@ -1,3 +1,32 @@
+let _warnedNoRequest = false;
+let _warnedNoAuthForMeGroups = false;
+let _warnedNoServiceTokenForAdminGroups = false;
+let _warnedAdminGroupsForbidden = false;
+let _adminGroupsEndpointForbidden = false;
+function warnOnce(kind, msg) {
+    if (kind === 'no_request') {
+        if (_warnedNoRequest)
+            return;
+        _warnedNoRequest = true;
+    }
+    else if (kind === 'no_auth_for_me_groups') {
+        if (_warnedNoAuthForMeGroups)
+            return;
+        _warnedNoAuthForMeGroups = true;
+    }
+    else if (kind === 'no_service_token_admin_groups') {
+        if (_warnedNoServiceTokenForAdminGroups)
+            return;
+        _warnedNoServiceTokenForAdminGroups = true;
+    }
+    console.warn(msg);
+}
+function warnAdminGroupsForbiddenOnce(msg) {
+    if (_warnedAdminGroupsForbidden)
+        return;
+    _warnedAdminGroupsForbidden = true;
+    console.warn(msg);
+}
 function uniqStrings(xs) {
     const out = [];
     const seen = new Set();
@@ -42,28 +71,6 @@ function getBearerFromRequest(request) {
     }
     return null;
 }
-
-let _warnedNoRequest = false;
-let _warnedNoAuthForMeGroups = false;
-let _warnedNoServiceTokenForAdminGroups = false;
-function warnOnce(kind, msg) {
-    if (kind === 'no_request') {
-        if (_warnedNoRequest)
-            return;
-        _warnedNoRequest = true;
-    }
-    else if (kind === 'no_auth_for_me_groups') {
-        if (_warnedNoAuthForMeGroups)
-            return;
-        _warnedNoAuthForMeGroups = true;
-    }
-    else if (kind === 'no_service_token_admin_groups') {
-        if (_warnedNoServiceTokenForAdminGroups)
-            return;
-        _warnedNoServiceTokenForAdminGroups = true;
-    }
-    console.warn(msg);
-}
 function getAuthBaseUrl(request) {
     // Prefer direct module URL (server-side)
     const direct = process.env.HIT_AUTH_URL || process.env.NEXT_PUBLIC_HIT_AUTH_URL;
@@ -85,6 +92,8 @@ async function fetchAuthMeGroupIds(request, strict) {
     const headers = {
         'Content-Type': 'application/json',
     };
+    // Auth module needs to know the dashboard origin so it can call metrics-core segment APIs.
+    // When we call auth directly (HIT_AUTH_URL) instead of via the dashboard proxy, we must provide this.
     headers['X-Frontend-Base-URL'] = baseUrlFromRequest(request);
     const bearer = getBearerFromRequest(request);
     if (bearer)
@@ -114,8 +123,12 @@ async function fetchAuthMeGroupIds(request, strict) {
     }
     return ids;
 }
-
 async function fetchAuthAdminUserGroupIds(request, userEmail, strict) {
+    // If we've already learned this endpoint is forbidden in this deployment (service token lacks perms),
+    // don't keep retrying on every request.
+    if (_adminGroupsEndpointForbidden) {
+        return [];
+    }
     const authBase = getAuthBaseUrl(request);
     if (!authBase) {
         if (strict)
@@ -128,6 +141,7 @@ async function fetchAuthAdminUserGroupIds(request, userEmail, strict) {
     const headers = {
         'Content-Type': 'application/json',
     };
+    // Same as above: required so auth can reach metrics-core segment APIs.
     headers['X-Frontend-Base-URL'] = baseUrlFromRequest(request);
     // Prefer service token for admin endpoints.
     const serviceToken = process.env.HIT_SERVICE_TOKEN;
@@ -139,6 +153,12 @@ async function fetchAuthAdminUserGroupIds(request, userEmail, strict) {
         headers.Authorization = bearer;
     const res = await fetch(`${authBase}/admin/users/${encodeURIComponent(email)}/groups`, { headers });
     if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+            _adminGroupsEndpointForbidden = true;
+            warnAdminGroupsForbiddenOnce(`[acl-utils] ${res.status} from ${authBase}/admin/users/{email}/groups. ` +
+                `Disabling admin-group expansion and relying on /me/groups instead.`);
+            return [];
+        }
         if (strict)
             throw new Error(`[acl-utils] GET ${authBase}/admin/users/{email}/groups failed: ${res.status} ${res.statusText}`);
         return [];
@@ -170,7 +190,10 @@ export async function resolveUserPrincipals(options) {
     const { request, user, includeTokenGroups = true, includeAuthMeGroups = true, strict = false, extraGroupIds, } = options;
     const userId = String(user.sub || '').trim();
     const userEmailRaw = String(user.email || '').trim();
-    const userEmail = userEmailRaw || (userId.includes('@') ? userId : '');
+    // In some deployments the JWT may omit `email` but set `sub` to the email address.
+    // Dynamic group evaluation in auth module is email-based, so recover it when possible.
+    const userEmail = userEmailRaw ||
+        (userId.includes('@') ? userId : '');
     const roles = uniqStrings(Array.isArray(user.roles) ? user.roles : []);
     const groupIds = [];
     if (includeTokenGroups) {
@@ -192,6 +215,7 @@ export async function resolveUserPrincipals(options) {
                 }
                 warnOnce('no_auth_for_me_groups', '[acl-utils] resolveUserPrincipals(): no bearer/cookie auth and no HIT_SERVICE_TOKEN; dynamic groups may be missing.');
             }
+            // /me/groups (user-auth) — best effort unless strict.
             try {
                 groupIds.push(...(await fetchAuthMeGroupIds(request, strict)));
             }
@@ -201,10 +225,6 @@ export async function resolveUserPrincipals(options) {
             }
         }
     }
-
-    // Also include admin-resolved groups when we have a service token.
-    // This restores dynamic groups like "Everyone" in deployments where segment evaluation
-    // requires service/admin privileges.
     // NOTE: Do NOT call auth admin endpoints for group membership here.
     // `/admin/users/{email}/groups` is admin-gated and will return 403 for normal users even with a service token.
     // Dynamic groups are included in `/me/groups` (when enabled) and that endpoint is what callers should use.

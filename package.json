@@ -1,6 +1,6 @@
 {
   "name": "@hit/acl-utils",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Shared ACL principal resolution utilities (users, roles, groups including dynamic groups via auth module)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
