@@ -33,3 +33,11 @@ coverage/
 # Temporary files
 *.tmp
 .cache/
+dist/
+__pycache__/
+*.py[cod]
+*.map
+.hit/service_tokens.json
+*.egg-info/
+.hit/generated/.manifest_hash
+.hit_deps_snapshot.json
