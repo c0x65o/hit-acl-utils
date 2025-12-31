@@ -1,6 +1,6 @@
 {
   "name": "@hit/acl-utils",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Shared ACL principal resolution utilities (users, roles, groups including dynamic groups via auth module)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -23,7 +23,7 @@
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^20",
     "typescript": "^5"
   },
   "license": "MIT",
