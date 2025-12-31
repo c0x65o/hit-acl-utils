@@ -35,9 +35,36 @@ export interface ResolveUserPrincipalsOptions {
    */
   includeAuthMeGroups?: boolean;
   /**
+   * Fail fast when group expansion cannot be performed.
+   *
+   * When true, this function throws instead of silently returning partial/incomplete groupIds.
+   * This is recommended for permission enforcement paths where "missing groups" should be treated
+   * as an error (fail closed) rather than "best effort" (fail open-ish).
+   *
+   * Defaults to false for backwards compatibility.
+   */
+  strict?: boolean;
+  /**
    * Optional additional group id sources (feature-pack specific), e.g. vault's own group membership tables.
    */
   extraGroupIds?: () => Promise<string[]>;
+}
+
+let _warnedNoRequest = false;
+let _warnedNoAuthForMeGroups = false;
+let _warnedNoServiceTokenForAdminGroups = false;
+function warnOnce(kind: 'no_request' | 'no_auth_for_me_groups' | 'no_service_token_admin_groups', msg: string) {
+  if (kind === 'no_request') {
+    if (_warnedNoRequest) return;
+    _warnedNoRequest = true;
+  } else if (kind === 'no_auth_for_me_groups') {
+    if (_warnedNoAuthForMeGroups) return;
+    _warnedNoAuthForMeGroups = true;
+  } else if (kind === 'no_service_token_admin_groups') {
+    if (_warnedNoServiceTokenForAdminGroups) return;
+    _warnedNoServiceTokenForAdminGroups = true;
+  }
+  console.warn(msg);
 }
 
 function uniqStrings(xs: string[]): string[] {
@@ -99,9 +126,12 @@ function getAuthBaseUrl(request?: RequestLike): string | null {
   return null;
 }
 
-async function fetchAuthMeGroupIds(request: RequestLike): Promise<string[]> {
+async function fetchAuthMeGroupIds(request: RequestLike, strict?: boolean): Promise<string[]> {
   const authBase = getAuthBaseUrl(request);
-  if (!authBase) return [];
+  if (!authBase) {
+    if (strict) throw new Error('[acl-utils] Auth base URL not configured (HIT_AUTH_URL / NEXT_PUBLIC_HIT_AUTH_URL or /api/proxy/auth).');
+    return [];
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -115,10 +145,16 @@ async function fetchAuthMeGroupIds(request: RequestLike): Promise<string[]> {
   if (serviceToken) headers['X-HIT-Service-Token'] = serviceToken;
 
   const res = await fetch(`${authBase}/me/groups`, { headers });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (strict) throw new Error(`[acl-utils] GET ${authBase}/me/groups failed: ${res.status} ${res.statusText}`);
+    return [];
+  }
 
   const data = await res.json().catch(() => null);
-  if (!Array.isArray(data)) return [];
+  if (!Array.isArray(data)) {
+    if (strict) throw new Error('[acl-utils] /me/groups returned a non-array response.');
+    return [];
+  }
 
   const ids: string[] = [];
   for (const row of data) {
@@ -129,9 +165,12 @@ async function fetchAuthMeGroupIds(request: RequestLike): Promise<string[]> {
   return ids;
 }
 
-async function fetchAuthAdminUserGroupIds(request: RequestLike, userEmail: string): Promise<string[]> {
+async function fetchAuthAdminUserGroupIds(request: RequestLike, userEmail: string, strict?: boolean): Promise<string[]> {
   const authBase = getAuthBaseUrl(request);
-  if (!authBase) return [];
+  if (!authBase) {
+    if (strict) throw new Error('[acl-utils] Auth base URL not configured (HIT_AUTH_URL / NEXT_PUBLIC_HIT_AUTH_URL or /api/proxy/auth).');
+    return [];
+  }
   const email = String(userEmail || '').trim().toLowerCase();
   if (!email) return [];
 
@@ -148,10 +187,16 @@ async function fetchAuthAdminUserGroupIds(request: RequestLike, userEmail: strin
   if (bearer) headers.Authorization = bearer;
 
   const res = await fetch(`${authBase}/admin/users/${encodeURIComponent(email)}/groups`, { headers });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (strict) throw new Error(`[acl-utils] GET ${authBase}/admin/users/{email}/groups failed: ${res.status} ${res.statusText}`);
+    return [];
+  }
 
   const data = await res.json().catch(() => null);
-  if (!Array.isArray(data)) return [];
+  if (!Array.isArray(data)) {
+    if (strict) throw new Error('[acl-utils] /admin/users/{email}/groups returned a non-array response.');
+    return [];
+  }
 
   const ids: string[] = [];
   for (const row of data) {
@@ -176,6 +221,7 @@ export async function resolveUserPrincipals(options: ResolveUserPrincipalsOption
     user,
     includeTokenGroups = true,
     includeAuthMeGroups = true,
+    strict = false,
     extraGroupIds,
   } = options;
 
@@ -188,11 +234,28 @@ export async function resolveUserPrincipals(options: ResolveUserPrincipalsOption
     groupIds.push(...(Array.isArray(user.groups) ? user.groups : []));
   }
 
-  if (includeAuthMeGroups && request) {
-    try {
-      groupIds.push(...(await fetchAuthMeGroupIds(request)));
-    } catch {
-      // Best effort only; callers should still function on JWT-only groups.
+  if (includeAuthMeGroups) {
+    if (!request) {
+      if (strict) {
+        throw new Error('[acl-utils] Cannot resolve auth groups without a request (needed to reach /api/proxy/auth or forward auth headers).');
+      }
+      warnOnce('no_request', '[acl-utils] resolveUserPrincipals(): request not provided; dynamic groups will not be resolved.');
+    } else {
+      const bearer = getBearerFromRequest(request);
+      const hasServiceToken = Boolean(process.env.HIT_SERVICE_TOKEN);
+      if (!bearer && !hasServiceToken) {
+        if (strict) {
+          throw new Error('[acl-utils] Cannot authenticate to auth module for group resolution (no Authorization/ hit_token cookie and no HIT_SERVICE_TOKEN).');
+        }
+        warnOnce('no_auth_for_me_groups', '[acl-utils] resolveUserPrincipals(): no bearer/cookie auth and no HIT_SERVICE_TOKEN; dynamic groups may be missing.');
+      }
+
+      // /me/groups (user-auth) — best effort unless strict.
+      try {
+        groupIds.push(...(await fetchAuthMeGroupIds(request, strict)));
+      } catch (e) {
+        if (strict) throw e;
+      }
     }
   }
 
@@ -206,21 +269,24 @@ export async function resolveUserPrincipals(options: ResolveUserPrincipalsOption
   // - Historically, Vault used the admin endpoint with a service token, which is why group sharing
   //   worked there. We want that behavior consistently across feature packs.
   if (includeAuthMeGroups && request && userEmail) {
-    try {
-      const hasServiceToken = Boolean(process.env.HIT_SERVICE_TOKEN);
-      if (hasServiceToken) {
-        groupIds.push(...(await fetchAuthAdminUserGroupIds(request, userEmail)));
+    const hasServiceToken = Boolean(process.env.HIT_SERVICE_TOKEN);
+    if (!hasServiceToken) {
+      // In many deployments dynamic group evaluation needs the service token path.
+      warnOnce('no_service_token_admin_groups', '[acl-utils] resolveUserPrincipals(): HIT_SERVICE_TOKEN not set; admin-resolved dynamic groups (e.g. "Everyone") may be missing.');
+    } else {
+      try {
+        groupIds.push(...(await fetchAuthAdminUserGroupIds(request, userEmail, strict)));
+      } catch (e) {
+        if (strict) throw e;
       }
-    } catch {
-      // Best effort
     }
   }
 
   if (extraGroupIds) {
     try {
       groupIds.push(...(await extraGroupIds()));
-    } catch {
-      // Best effort
+    } catch (e) {
+      if (strict) throw e;
     }
   }
 

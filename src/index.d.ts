@@ -36,6 +36,13 @@ export interface ResolveUserPrincipalsOptions {
      */
     includeAuthMeGroups?: boolean;
     /**
+     * Fail fast when group expansion cannot be performed.
+     *
+     * When true, this function throws instead of silently returning partial/incomplete groupIds.
+     * Defaults to false for backwards compatibility.
+     */
+    strict?: boolean;
+    /**
      * Optional additional group id sources (feature-pack specific), e.g. vault's own group membership tables.
      */
     extraGroupIds?: () => Promise<string[]>;
